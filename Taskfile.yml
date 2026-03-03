@@ -1,0 +1,52 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Run the default build task
+    cmds:
+      - task: build
+
+  build:
+    desc: Build the CLI in release mode
+    cmds:
+      - cargo build --release
+    sources:
+      - src/**/*.rs
+      - Cargo.toml
+
+  dev:
+    desc: Build in debug mode for development
+    cmds:
+      - cargo build
+
+  test:
+    desc: Run the tests
+    cmds:
+      - cargo test
+
+  check:
+    desc: Run clippy and tests
+    cmds:
+      - cargo clippy -- -D warnings
+      - cargo test
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - cargo clean
+
+  install:
+    desc: Install the CLI locally to ~/.local/bin
+    cmds:
+      - mkdir -p ~/.local/bin
+      - task: build
+      - cp target/release/killalltofu ~/.local/bin/
+      - echo "killalltofu installed to ~/.local/bin/killalltofu"
+      - echo "Make sure ~/.local/bin is in your PATH"
+
+  run:
+    desc: Run the CLI with arguments
+    cmds:
+      - cargo run -- {{.CLI_ARGS}}
+    vars:
+      CLI_ARGS: '{{default .CLI_ARGS ""}}'

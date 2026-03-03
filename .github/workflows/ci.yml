@@ -1,0 +1,194 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run checks
+        run: cargo clippy -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: killalltofu
+            asset_name: killalltofu-linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: killalltofu
+            asset_name: killalltofu-linux-aarch64
+            cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: killalltofu
+            asset_name: killalltofu-macos-aarch64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact_name: killalltofu
+            asset_name: killalltofu-macos-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.cross == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross && 'aarch64-linux-gnu-gcc' || '' }}
+
+      - name: Strip binary (Unix native)
+        if: matrix.cross != true
+        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+      - name: Strip binary (Cross-compiled ARM64)
+        if: matrix.cross == true
+        run: aarch64-linux-gnu-strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+      - name: Create tarball
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czvf ${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
+          shasum -a 256 ${{ matrix.asset_name }}.tar.gz > ${{ matrix.asset_name }}.tar.gz.sha256
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}.tar.gz
+          path: target/${{ matrix.target }}/release/${{ matrix.asset_name }}.tar.gz
+
+      - name: Upload sha256 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}.tar.gz.sha256
+          path: target/${{ matrix.target }}/release/${{ matrix.asset_name }}.tar.gz.sha256
+
+  release:
+    name: Release
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      macos_arm64_sha256: ${{ steps.checksums.outputs.macos_arm64_sha256 }}
+      macos_x86_64_sha256: ${{ steps.checksums.outputs.macos_x86_64_sha256 }}
+      linux_x86_64_sha256: ${{ steps.checksums.outputs.linux_x86_64_sha256 }}
+      linux_arm64_sha256: ${{ steps.checksums.outputs.linux_arm64_sha256 }}
+    steps:
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f -name "*.tar.gz" -exec mv {} release/ \;
+          ls -la release/
+
+      - name: Extract checksums
+        id: checksums
+        run: |
+          cd artifacts
+          echo "macos_arm64_sha256=$(awk '{print $1}' killalltofu-macos-aarch64.tar.gz.sha256/killalltofu-macos-aarch64.tar.gz.sha256)" >> "$GITHUB_OUTPUT"
+          echo "macos_x86_64_sha256=$(awk '{print $1}' killalltofu-macos-x86_64.tar.gz.sha256/killalltofu-macos-x86_64.tar.gz.sha256)" >> "$GITHUB_OUTPUT"
+          echo "linux_x86_64_sha256=$(awk '{print $1}' killalltofu-linux-x86_64.tar.gz.sha256/killalltofu-linux-x86_64.tar.gz.sha256)" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64_sha256=$(awk '{print $1}' killalltofu-linux-aarch64.tar.gz.sha256/killalltofu-linux-aarch64.tar.gz.sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew:
+    name: Update Homebrew Formula
+    if: github.event_name == 'release'
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Homebrew tap update
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: killallgit/homebrew-killallgit
+          event-type: formula-update
+          client-payload: |
+            {
+              "formula": "killalltofu",
+              "version": "${{ needs.release.outputs.version }}",
+              "macos_arm64_sha256": "${{ needs.release.outputs.macos_arm64_sha256 }}",
+              "macos_x86_64_sha256": "${{ needs.release.outputs.macos_x86_64_sha256 }}",
+              "linux_x86_64_sha256": "${{ needs.release.outputs.linux_x86_64_sha256 }}",
+              "linux_arm64_sha256": "${{ needs.release.outputs.linux_arm64_sha256 }}"
+            }
