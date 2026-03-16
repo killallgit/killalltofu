@@ -3,7 +3,6 @@ use std::process::{Command, Output};
 
 use anyhow::{Context, Result};
 
-use crate::registry::Engine;
 
 pub struct DestroyResult {
     pub success: bool,
@@ -11,14 +10,14 @@ pub struct DestroyResult {
     pub output: String,
 }
 
-pub fn run_destroy(engine: Engine, project_path: &Path) -> Result<DestroyResult> {
-    let (cmd, args) = destroy_command(engine);
+pub fn run_destroy(binary_path: &str, project_path: &Path) -> Result<DestroyResult> {
+    let args = destroy_args();
 
-    let output: Output = Command::new(cmd)
+    let output: Output = Command::new(binary_path)
         .args(args)
         .current_dir(project_path)
         .output()
-        .with_context(|| format!("failed to execute {engine} destroy in {}", project_path.display()))?;
+        .with_context(|| format!("failed to execute {binary_path} destroy in {}", project_path.display()))?;
 
     let combined = format!(
         "{}\n{}",
@@ -33,14 +32,14 @@ pub fn run_destroy(engine: Engine, project_path: &Path) -> Result<DestroyResult>
     })
 }
 
-pub fn run_destroy_streaming(engine: Engine, project_path: &Path) -> Result<DestroyResult> {
-    let (cmd, args) = destroy_command(engine);
+pub fn run_destroy_streaming(binary_path: &str, project_path: &Path) -> Result<DestroyResult> {
+    let args = destroy_args();
 
-    let status = Command::new(cmd)
+    let status = Command::new(binary_path)
         .args(args)
         .current_dir(project_path)
         .status()
-        .with_context(|| format!("failed to execute {engine} destroy in {}", project_path.display()))?;
+        .with_context(|| format!("failed to execute {binary_path} destroy in {}", project_path.display()))?;
 
     Ok(DestroyResult {
         success: status.success(),
@@ -49,9 +48,6 @@ pub fn run_destroy_streaming(engine: Engine, project_path: &Path) -> Result<Dest
     })
 }
 
-fn destroy_command(engine: Engine) -> (&'static str, Vec<&'static str>) {
-    match engine {
-        Engine::Tofu => ("tofu", vec!["destroy", "-auto-approve"]),
-        Engine::Terragrunt => ("terragrunt", vec!["destroy", "-auto-approve"]),
-    }
+fn destroy_args() -> Vec<&'static str> {
+    vec!["destroy", "-auto-approve"]
 }

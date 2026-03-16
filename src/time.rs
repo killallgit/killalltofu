@@ -18,7 +18,7 @@ pub fn compute_destroy_at(duration_str: &str) -> Result<DateTime<Utc>> {
 
 const BACKOFF_SECONDS: [i64; 3] = [0, 300, 900];
 
-pub fn backoff_for_attempt(attempt: u32) -> Option<TimeDelta> {
+pub fn delay_before_attempt(attempt: u32) -> Option<TimeDelta> {
     let idx = attempt as usize;
     if idx >= BACKOFF_SECONDS.len() {
         return None;
@@ -27,7 +27,7 @@ pub fn backoff_for_attempt(attempt: u32) -> Option<TimeDelta> {
 }
 
 pub fn is_retry_eligible(attempt: u32, last_attempt_at: Option<DateTime<Utc>>) -> bool {
-    let Some(backoff) = backoff_for_attempt(attempt) else {
+    let Some(backoff) = delay_before_attempt(attempt) else {
         return false;
     };
     match (attempt, last_attempt_at) {
@@ -72,25 +72,25 @@ mod tests {
 
     #[test]
     fn test_backoff_attempt_0() {
-        let b = backoff_for_attempt(0).unwrap();
+        let b = delay_before_attempt(0).unwrap();
         assert_eq!(b.num_seconds(), 0);
     }
 
     #[test]
     fn test_backoff_attempt_1() {
-        let b = backoff_for_attempt(1).unwrap();
+        let b = delay_before_attempt(1).unwrap();
         assert_eq!(b.num_seconds(), 300);
     }
 
     #[test]
     fn test_backoff_attempt_2() {
-        let b = backoff_for_attempt(2).unwrap();
+        let b = delay_before_attempt(2).unwrap();
         assert_eq!(b.num_seconds(), 900);
     }
 
     #[test]
     fn test_backoff_attempt_3_is_none() {
-        assert!(backoff_for_attempt(3).is_none());
+        assert!(delay_before_attempt(3).is_none());
     }
 
     #[test]

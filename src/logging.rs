@@ -13,7 +13,7 @@ pub fn write_attempt_log(
     exit_code: Option<i32>,
     output: &str,
 ) -> Result<()> {
-    let dir = logs_dir();
+    let dir = logs_dir()?;
     fs::create_dir_all(&dir).with_context(|| "failed to create logs directory")?;
 
     let filename = format!("{key}-attempt-{attempt}.log");
@@ -21,11 +21,11 @@ pub fn write_attempt_log(
 
     let content = format!(
         "Engine: {engine}\n\
-         Path: {path}\n\
-         Timestamp: {timestamp}\n\
-         Exit code: {exit_code}\n\
-         --- OUTPUT ---\n\
-         {output}",
+Path: {path}\n\
+Timestamp: {timestamp}\n\
+Exit code: {exit_code}\n\
+--- OUTPUT ---\n\
+{output}",
         path = path.display(),
         timestamp = Utc::now().to_rfc3339(),
         exit_code = exit_code.map_or("unknown".to_string(), |c| c.to_string()),
@@ -44,11 +44,11 @@ pub fn write_killallerror(
 ) -> Result<()> {
     let content = format!(
         "Engine: {engine}\n\
-         Attempts: {attempts}\n\
-         Last attempt: {timestamp}\n\
-         See logs: ~/.killalltofu/logs/{key}-attempt-*.log\n\
-         --- LAST OUTPUT ---\n\
-         {output}",
+Attempts: {attempts}\n\
+Last attempt: {timestamp}\n\
+See logs: ~/.killalltofu/logs/{key}-attempt-*.log\n\
+--- LAST OUTPUT ---\n\
+{output}",
         timestamp = Utc::now().to_rfc3339(),
     );
 

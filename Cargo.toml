@@ -2,7 +2,7 @@
 name = "killalltofu-cli"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT"
 description = "CLI tool for scheduling automatic destruction of Terraform/OpenTofu infrastructure"
 repository = "https://github.com/killallgit/killalltofu"
@@ -19,6 +19,8 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
 humantime = "2.1"
 home = "0.5"
+fs2 = "0.4.3"
+which = "8.0.2"
 
 [dev-dependencies]
 tempfile = "3"

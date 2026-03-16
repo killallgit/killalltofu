@@ -4,6 +4,29 @@ use anyhow::{Context, Result};
 
 const CRON_MARKER: &str = "killalltofu check";
 
+pub fn check_crontab_available() -> Result<()> {
+    let output = match Command::new("crontab").arg("-l").output() {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("crontab not found. killalltofu requires cron to schedule destruction")
+        }
+        Err(e) => {
+            anyhow::bail!("crontab not accessible: {e}")
+        }
+    };
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("no crontab for") {
+        return Ok(());
+    }
+
+    anyhow::bail!("crontab not usable: {}", stderr.trim())
+}
+
 pub fn ensure_cron_installed() -> Result<()> {
     if is_cron_installed()? {
         return Ok(());
@@ -26,9 +49,20 @@ fn is_cron_installed() -> Result<bool> {
 }
 
 fn killalltofu_binary_path() -> Result<String> {
-    std::env::current_exe()
-        .with_context(|| "failed to determine killalltofu binary path")
-        .map(|p| p.to_string_lossy().to_string())
+    let path = std::env::current_exe()
+        .with_context(|| "failed to determine killalltofu binary path")?
+        .to_string_lossy()
+        .to_string();
+
+    if path.contains("/target/debug/") || path.contains("/target/release/") {
+        eprintln!(
+            "warning: binary path looks like a build artifact: {path}\n  \
+             cron will break if the build directory is cleaned.\n  \
+             consider installing with: cargo install --path . or brew install killalltofu"
+        );
+    }
+
+    Ok(path)
 }
 
 fn install_cron_entry() -> Result<()> {

@@ -1,2 +1,13 @@
 /target
 /output
+
+# Terraform/OpenTofu
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform.lock.hcl
+
+# killalltofu markers
+.killalltofu
+.killallerror

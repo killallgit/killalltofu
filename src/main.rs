@@ -14,7 +14,8 @@ use clap::{Parser, Subcommand};
 use crate::destroy::{run_destroy, run_destroy_streaming};
 use crate::logging::{write_attempt_log, write_killallerror};
 use crate::registry::{
-    detect_engine, load_registry, save_registry, sanitize_path_to_key, RegistryEntry,
+    detect_engine, load_registry, load_registry_shared, lock_registry, lock_registry_shared,
+    save_registry, sanitize_path_to_key, RegistryEntry,
 };
 use crate::time::{compute_destroy_at, is_retry_eligible};
 
@@ -27,7 +28,6 @@ struct Cli {
     command: Option<Commands>,
 
     /// Duration until destruction (e.g., 30s, 5m, 1h, 1d)
-    #[arg(conflicts_with = "command")]
     duration: Option<String>,
 }
 
@@ -69,22 +69,28 @@ fn main() -> Result<()> {
 
 fn cmd_register(duration: &str) -> Result<()> {
     let cwd = env::current_dir().with_context(|| "failed to get current directory")?;
+
+    // Preflight: validate everything before making any changes
     let destroy_at = compute_destroy_at(duration)?;
-    let engine = detect_engine(&cwd);
+    let (engine, binary_path) = detect_engine(&cwd)?;
+    cron::check_crontab_available()?;
+
     let key = sanitize_path_to_key(&cwd);
 
-    let mut registry = load_registry()?;
+    let lock = lock_registry()?;
+    let mut registry = load_registry(&lock)?;
     registry.insert(
         key.clone(),
         RegistryEntry {
             path: cwd.clone(),
             destroy_at,
             engine,
+            binary_path: binary_path.clone(),
             attempts: 0,
             last_attempt_at: None,
         },
     );
-    save_registry(&registry)?;
+    save_registry(&lock, &registry)?;
 
     let marker_path = cwd.join(".killalltofu");
     fs::write(&marker_path, destroy_at.to_rfc3339())
@@ -93,13 +99,14 @@ fn cmd_register(duration: &str) -> Result<()> {
     cron::ensure_cron_installed()?;
 
     eprintln!(
-        "registered: {key}\n  engine: {engine}\n  destroy at: {destroy_at}",
+        "registered: {key}\n  engine: {engine} ({binary_path})\n  destroy at: {destroy_at}",
     );
     Ok(())
 }
 
 fn cmd_list() -> Result<()> {
-    let registry = load_registry()?;
+    let lock = lock_registry_shared()?;
+    let registry = load_registry_shared(&lock)?;
 
     if registry.is_empty() {
         println!("no projects registered");
@@ -127,11 +134,12 @@ fn cmd_cancel() -> Result<()> {
     let cwd = env::current_dir().with_context(|| "failed to get current directory")?;
     let key = sanitize_path_to_key(&cwd);
 
-    let mut registry = load_registry()?;
+    let lock = lock_registry()?;
+    let mut registry = load_registry(&lock)?;
     if registry.remove(&key).is_none() {
         anyhow::bail!("no project registered for: {key}");
     }
-    save_registry(&registry)?;
+    save_registry(&lock, &registry)?;
 
     let marker = cwd.join(".killalltofu");
     if marker.exists() {
@@ -143,7 +151,25 @@ fn cmd_cancel() -> Result<()> {
 }
 
 fn cmd_kill(name: Option<String>) -> Result<()> {
-    let (key, entry) = resolve_target(name)?;
+    let (key, entry) = {
+        let lock = lock_registry_shared()?;
+        let registry = load_registry_shared(&lock)?;
+
+        let key = match name {
+            Some(n) => n,
+            None => {
+                let cwd = env::current_dir().with_context(|| "failed to get current directory")?;
+                sanitize_path_to_key(&cwd)
+            }
+        };
+
+        let entry = registry
+            .get(&key)
+            .with_context(|| format!("no project registered for: {key}"))?
+            .clone();
+
+        (key, entry)
+    };
 
     eprintln!(
         "destroying: {} (engine: {}, path: {})",
@@ -152,10 +178,14 @@ fn cmd_kill(name: Option<String>) -> Result<()> {
         entry.path.display()
     );
 
-    let result = run_destroy_streaming(entry.engine, &entry.path)?;
+    let result = run_destroy_streaming(&entry.binary_path, &entry.path)?;
 
     if result.success {
-        cleanup_success(&key, &entry.path)?;
+        let lock = lock_registry()?;
+        let mut registry = load_registry(&lock)?;
+        registry.remove(&key);
+        save_registry(&lock, &registry)?;
+        remove_marker_file(&entry.path);
         eprintln!("destroyed: {key}");
     } else {
         let code = result.exit_code.map_or("unknown".to_string(), |c| c.to_string());
@@ -165,90 +195,103 @@ fn cmd_kill(name: Option<String>) -> Result<()> {
 }
 
 fn cmd_check() -> Result<()> {
-    let mut registry = load_registry()?;
-    let now = Utc::now();
+    let due_entries: Vec<(String, RegistryEntry)> = {
+        let lock = lock_registry_shared()?;
+        let registry = load_registry_shared(&lock)?;
+        let now = Utc::now();
 
-    let due_keys: Vec<String> = registry
+        registry
+            .iter()
+            .filter(|(_, entry)| now >= entry.destroy_at)
+            .filter(|(_, entry)| is_retry_eligible(entry.attempts, entry.last_attempt_at))
+            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .collect()
+    };
+
+    let results: Vec<(String, DestroyOutcome)> = due_entries
         .iter()
-        .filter(|(_, entry)| now >= entry.destroy_at)
-        .filter(|(_, entry)| is_retry_eligible(entry.attempts, entry.last_attempt_at))
-        .map(|(key, _)| key.clone())
+        .map(|(key, entry)| {
+            let outcome = process_destroy(key, entry);
+            (key.clone(), outcome)
+        })
         .collect();
 
-    for key in due_keys {
-        let entry = registry.get(&key).unwrap().clone();
-        process_destroy(&key, &entry, &mut registry)?;
+    let lock = lock_registry()?;
+    let mut registry = load_registry(&lock)?;
+    for (key, outcome) in results {
+        match outcome {
+            DestroyOutcome::Success => {
+                registry.remove(&key);
+            }
+            DestroyOutcome::MaxRetries => {
+                registry.remove(&key);
+            }
+            DestroyOutcome::Retry { attempts } => {
+                if let Some(entry) = registry.get_mut(&key) {
+                    entry.attempts = attempts;
+                    entry.last_attempt_at = Some(Utc::now());
+                }
+            }
+            DestroyOutcome::Error => {}
+        }
     }
+    save_registry(&lock, &registry)?;
 
-    save_registry(&registry)?;
     Ok(())
 }
 
-fn process_destroy(
-    key: &str,
-    entry: &RegistryEntry,
-    registry: &mut registry::Registry,
-) -> Result<()> {
+enum DestroyOutcome {
+    Success,
+    MaxRetries,
+    Retry { attempts: u32 },
+    Error,
+}
+
+fn process_destroy(key: &str, entry: &RegistryEntry) -> DestroyOutcome {
     let attempt = entry.attempts + 1;
     eprintln!("attempt {attempt}/{MAX_ATTEMPTS} for {key}");
 
-    let result = run_destroy(entry.engine, &entry.path)?;
+    let result = match run_destroy(&entry.binary_path, &entry.path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error processing {key}: {e:#}");
+            return DestroyOutcome::Error;
+        }
+    };
 
-    write_attempt_log(
+    if let Err(e) = write_attempt_log(
         key,
         attempt,
         entry.engine,
         &entry.path,
         result.exit_code,
         &result.output,
-    )?;
-
-    if result.success {
-        cleanup_success(key, &entry.path)?;
-        registry.remove(key);
-        eprintln!("destroyed: {key}");
-    } else if attempt >= MAX_ATTEMPTS {
-        write_killallerror(&entry.path, key, entry.engine, attempt, &result.output)?;
-        registry.remove(key);
-        eprintln!("max retries reached for {key}, wrote .killallerror");
-    } else {
-        let reg_entry = registry.get_mut(key).unwrap();
-        reg_entry.attempts = attempt;
-        reg_entry.last_attempt_at = Some(Utc::now());
-        eprintln!("attempt {attempt} failed for {key}, will retry");
+    ) {
+        eprintln!("failed to write log for {key}: {e:#}");
     }
 
-    Ok(())
-}
-
-fn resolve_target(name: Option<String>) -> Result<(String, RegistryEntry)> {
-    let registry = load_registry()?;
-
-    let key = match name {
-        Some(n) => n,
-        None => {
-            let cwd = env::current_dir().with_context(|| "failed to get current directory")?;
-            sanitize_path_to_key(&cwd)
+    if result.success {
+        remove_marker_file(&entry.path);
+        eprintln!("destroyed: {key}");
+        DestroyOutcome::Success
+    } else if attempt >= MAX_ATTEMPTS {
+        if let Err(e) =
+            write_killallerror(&entry.path, key, entry.engine, attempt, &result.output)
+        {
+            eprintln!("failed to write .killallerror for {key}: {e:#}");
         }
-    };
-
-    let entry = registry
-        .get(&key)
-        .with_context(|| format!("no project registered for: {key}"))?
-        .clone();
-
-    Ok((key, entry))
+        eprintln!("max retries reached for {key}, wrote .killallerror");
+        DestroyOutcome::MaxRetries
+    } else {
+        eprintln!("attempt {attempt} failed for {key}, will retry");
+        DestroyOutcome::Retry { attempts: attempt }
+    }
 }
 
-fn cleanup_success(key: &str, project_path: &std::path::Path) -> Result<()> {
+
+fn remove_marker_file(project_path: &std::path::Path) {
     let marker = project_path.join(".killalltofu");
     if marker.exists() {
         fs::remove_file(&marker).ok();
     }
-
-    let mut registry = load_registry()?;
-    registry.remove(key);
-    save_registry(&registry)?;
-
-    Ok(())
 }
