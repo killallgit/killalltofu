@@ -65,6 +65,51 @@ fn killalltofu_binary_path() -> Result<String> {
     Ok(path)
 }
 
+pub fn uninstall_cron_entry() -> Result<()> {
+    let output = Command::new("crontab")
+        .arg("-l")
+        .output()
+        .with_context(|| "failed to read crontab")?;
+
+    if !output.status.success() {
+        return Ok(());
+    }
+
+    let existing = String::from_utf8_lossy(&output.stdout);
+    let filtered: Vec<&str> = existing
+        .lines()
+        .filter(|line| !line.contains(CRON_MARKER))
+        .collect();
+
+    let new_crontab = if filtered.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", filtered.join("\n"))
+    };
+
+    let mut child = Command::new("crontab")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| "failed to spawn crontab")?;
+
+    use std::io::Write;
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(new_crontab.as_bytes())
+        .with_context(|| "failed to write to crontab")?;
+
+    let status = child.wait().with_context(|| "failed to wait for crontab")?;
+    if !status.success() {
+        anyhow::bail!("crontab command failed");
+    }
+
+    eprintln!("removed cron entry (no projects remaining)");
+    Ok(())
+}
+
 fn install_cron_entry() -> Result<()> {
     let binary = killalltofu_binary_path()?;
     let cron_line = format!("* * * * * {binary} check");

@@ -139,6 +139,7 @@ fn cmd_cancel() -> Result<()> {
     if registry.remove(&key).is_none() {
         anyhow::bail!("no project registered for: {key}");
     }
+    let is_empty = registry.is_empty();
     save_registry(&lock, &registry)?;
 
     let marker = cwd.join(".killalltofu");
@@ -147,6 +148,11 @@ fn cmd_cancel() -> Result<()> {
     }
 
     eprintln!("cancelled: {key}");
+
+    if is_empty {
+        cron::uninstall_cron_entry()?;
+    }
+
     Ok(())
 }
 
@@ -184,9 +190,13 @@ fn cmd_kill(name: Option<String>) -> Result<()> {
         let lock = lock_registry()?;
         let mut registry = load_registry(&lock)?;
         registry.remove(&key);
+        let is_empty = registry.is_empty();
         save_registry(&lock, &registry)?;
         remove_marker_file(&entry.path);
         eprintln!("destroyed: {key}");
+        if is_empty {
+            cron::uninstall_cron_entry()?;
+        }
     } else {
         let code = result.exit_code.map_or("unknown".to_string(), |c| c.to_string());
         anyhow::bail!("destroy failed (exit code: {code})");
@@ -236,6 +246,10 @@ fn cmd_check() -> Result<()> {
         }
     }
     save_registry(&lock, &registry)?;
+
+    if registry.is_empty() {
+        cron::uninstall_cron_entry()?;
+    }
 
     Ok(())
 }
